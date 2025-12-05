@@ -211,6 +211,7 @@ where
             Err(error) => Err(match error {
                 sys_dc::CaptureError::Temporary => CaptureError::Temporary,
                 sys_dc::CaptureError::Permanent => CaptureError::Permanent,
+                sys_dc::CaptureError::UserStopped => CaptureError::UserStopped,
             }),
         }
     }
@@ -250,4 +251,5 @@ impl CaptureSource {
 pub(crate) enum CaptureError {
     Temporary,
     Permanent,
+    UserStopped,
 }
