@@ -1872,12 +1872,8 @@ impl SessionInner {
                 }
             }
 
-            // This is needed if we want to publish a different codec in the room for a track type
-            let preferred: Vec<_> =
-                matched.into_iter().chain(partial_matched).chain(unmatched).collect();
-            if !preferred.is_empty() {
-                transceiver.set_codec_preferences(preferred)?;
-            }
+            matched.extend(partial_matched);
+            transceiver.set_codec_preferences(matched)?;
         }
 
         Ok(transceiver)
