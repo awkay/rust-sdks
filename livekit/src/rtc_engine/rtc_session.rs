@@ -1848,7 +1848,6 @@ impl SessionInner {
 
             let mut matched = Vec::new();
             let mut partial_matched = Vec::new();
-            let mut unmatched = Vec::new();
 
             for codec in capabilities.codecs {
                 let mime_type = codec.mime_type.to_lowercase();
@@ -1867,11 +1866,11 @@ impl SessionInner {
                         }
                     }
                     partial_matched.push(codec);
-                } else {
-                    unmatched.push(codec);
                 }
             }
 
+            // SetCodecPreferences allows every codec in the list; keep this restricted to the
+            // requested codec so later tracks can negotiate a different codec on the same PC.
             matched.extend(partial_matched);
             transceiver.set_codec_preferences(matched)?;
         }
