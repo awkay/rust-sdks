@@ -1871,7 +1871,13 @@ impl SessionInner {
 
             // SetCodecPreferences allows every codec in the list; keep this restricted to the
             // requested codec so later tracks can negotiate a different codec on the same PC.
-            matched.extend(partial_matched);
+            // Preserve the selected H.264 profile when one is available. Adding every partial
+            // H.264 match back here lets the answer select a different profile and can move an
+            // Apple sender from VideoToolbox to OpenH264. Other codecs and peers without the
+            // preferred H.264 profile still need the partial matches as a fallback.
+            if matched.is_empty() {
+                matched = partial_matched;
+            }
             transceiver.set_codec_preferences(matched)?;
         }
 

@@ -125,6 +125,18 @@ std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::Create(
           return factory->Create(env, adjusted);
       }
     }
+
+#ifdef __APPLE__
+    // LiveKit may rewrite constrained-baseline H.264 (42e0xx) to baseline
+    // (4200xx). VideoToolbox reads the actual profile from the SPS, so an SDP
+    // profile mismatch must not bypass the platform decoder.
+    for (const auto& factory : factories_) {
+      for (const auto& sf : factory->GetSupportedFormats()) {
+        if (absl::EqualsIgnoreCase(sf.name, webrtc::kH264CodecName))
+          return factory->Create(env, format);
+      }
+    }
+#endif
   }
 
   if (absl::EqualsIgnoreCase(format.name, webrtc::kVp8CodecName))
