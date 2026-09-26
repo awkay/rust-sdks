@@ -32,7 +32,7 @@ use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 
 use super::TrackInner;
-use crate::{prelude::*, rtc_engine::lk_runtime::LkRuntime};
+use crate::{options::VideoEncodingUpdate, prelude::*, rtc_engine::lk_runtime::LkRuntime};
 
 pub use libwebrtc::native::packet_trailer::{PublishTimingEvent, PublishTimingStage};
 
@@ -404,6 +404,47 @@ impl LocalVideoTrack {
         } else {
             log::debug!("dynacast: layers unchanged [{}]", layers.join(", "));
         }
+
+        Ok(())
+    }
+
+    /// Changes the sender's encoding parameters on a published track without
+    /// republishing it (e.g. to lower bitrate, framerate or resolution mid-stream).
+    /// Fields left as `None` in `update` are not modified.
+    pub fn set_encoding_parameters(&self, update: VideoEncodingUpdate) -> RoomResult<()> {
+        let transceiver = self.transceiver().ok_or_else(|| {
+            RoomError::Internal("cannot set encoding parameters: no transceiver".into())
+        })?;
+
+        let sender = transceiver.sender();
+        let mut params = sender.parameters();
+
+        if params.encodings.is_empty() {
+            return Err(RoomError::Internal(
+                "cannot set encoding parameters: sender has no encodings".into(),
+            ));
+        }
+
+        for encoding in &mut params.encodings {
+            if let Some(max_bitrate) = update.max_bitrate {
+                encoding.max_bitrate = Some(max_bitrate);
+            }
+            if let Some(max_framerate) = update.max_framerate {
+                encoding.max_framerate = Some(max_framerate);
+            }
+            if let Some(scale) = update.scale_resolution_down_by {
+                encoding.scale_resolution_down_by = Some(scale);
+            }
+        }
+
+        if let Some(preference) = update.degradation_preference {
+            params.set_degradation_preference(preference);
+        }
+
+        sender
+            .set_parameters(params)
+            .map_err(|e| RoomError::Internal(format!("failed to set sender parameters: {}", e)))?;
+        log::debug!("encoding parameters updated: {:?}", update);
 
         Ok(())
     }

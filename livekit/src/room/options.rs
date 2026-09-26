@@ -58,6 +58,19 @@ pub struct VideoEncoding {
     pub max_framerate: f64,
 }
 
+/// Live changes to apply to a published video track's sender encodings.
+///
+/// Used with [`LocalVideoTrack::set_encoding_parameters`](crate::track::LocalVideoTrack::set_encoding_parameters).
+/// `None` fields are left unchanged. The encoding values are written to every
+/// encoding of the sender; the degradation preference applies to the sender as a whole.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VideoEncodingUpdate {
+    pub max_bitrate: Option<u64>,
+    pub max_framerate: Option<f64>,
+    pub scale_resolution_down_by: Option<f64>,
+    pub degradation_preference: Option<DegradationPreference>,
+}
+
 #[derive(Debug, Clone)]
 pub struct VideoPreset {
     pub encoding: VideoEncoding,
