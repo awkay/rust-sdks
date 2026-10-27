@@ -1833,8 +1833,7 @@ impl SessionInner {
             send_encodings: encodings,
         };
 
-        let transceiver =
-            self.publisher_pc.peer_connection().add_transceiver(track.rtc_track(), init)?;
+        let transceiver = self.publisher_pc.add_send_transceiver(track.rtc_track(), init)?;
 
         if track.kind() == TrackKind::Video {
             transceiver.sender().set_video_encoder_backend(options.video_encoder);
