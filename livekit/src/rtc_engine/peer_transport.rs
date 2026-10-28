@@ -41,6 +41,9 @@ pub struct PeerTransport {
     peer_connection: PeerConnection,
     on_offer_handler: Mutex<Option<OnOfferCreated>>,
     inner: Arc<AsyncMutex<TransportInner>>,
+    /// Transceivers added with [`PeerTransport::add_send_transceiver`]. Their m-sections keep
+    /// `a=inactive` once their track is removed (see `munge_inactive_to_recvonly_for_media`).
+    send_transceivers: Mutex<Vec<RtpTransceiver>>,
 }
 
 impl Debug for PeerTransport {
@@ -67,7 +70,24 @@ impl PeerTransport {
                 max_send_bitrate_bps: None,
                 pending_initial_offer: None,
             })),
+            send_transceivers: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Adds a transceiver that sends `track`, and remembers it as a send transceiver.
+    pub fn add_send_transceiver(
+        &self,
+        track: MediaStreamTrack,
+        init: RtpTransceiverInit,
+    ) -> EngineResult<RtpTransceiver> {
+        let transceiver = self.peer_connection.add_transceiver(track, init)?;
+        self.send_transceivers.lock().push(transceiver.clone());
+        Ok(transceiver)
+    }
+
+    /// The mids of the send transceivers that have been negotiated.
+    fn send_mids(&self) -> Vec<String> {
+        self.send_transceivers.lock().iter().filter_map(RtpTransceiver::mid).collect()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -162,7 +182,7 @@ impl PeerTransport {
         let mut sdp = offer.to_string();
 
         // Apply inactive→recvonly munging for single PC mode
-        let recvonly_munged = Self::munge_inactive_to_recvonly_for_media(&sdp);
+        let recvonly_munged = Self::munge_inactive_to_recvonly_for_media(&sdp, &self.send_mids());
         if recvonly_munged != sdp {
             if let Ok(parsed) = SessionDescription::parse(&recvonly_munged, offer.sdp_type()) {
                 offer = parsed;
@@ -237,7 +257,13 @@ impl PeerTransport {
     ///
     /// We intentionally limit this to RTP m-sections, so non-RTP sections (for example
     /// data-channel `m=application` sections) are not rewritten.
-    fn munge_inactive_to_recvonly_for_media(sdp: &str) -> String {
+    ///
+    /// The m-sections of `send_mids` are left alone: a send transceiver is inactive once its
+    /// track is removed. As recvonly, WebRTC would apply its codecs as receive codecs, and the
+    /// offer fails to apply when one has no decoder (H264 High `profile-level-id=640033`, the
+    /// preferred screen share profile, is a sender capability only), which breaks every later
+    /// negotiation of the publisher.
+    fn munge_inactive_to_recvonly_for_media(sdp: &str, send_mids: &[String]) -> String {
         // Detect what line ending the original SDP uses
         let uses_crlf = sdp.contains("\r\n");
         let eol = if uses_crlf { "\r\n" } else { "\n" };
@@ -248,16 +274,22 @@ impl PeerTransport {
         let mut out: Vec<String> = Vec::with_capacity(lines.len());
         let mut in_rtp_media_section = false;
 
-        for line in lines {
+        for (i, line) in lines.iter().enumerate() {
             let l = line.trim();
 
-            // Track whether the current m-section is RTP-based.
+            // Track whether the current m-section is RTP-based and not a send transceiver's.
             if l.starts_with("m=") {
                 // Example RTP m-line:
                 //   m=audio 9 UDP/TLS/RTP/SAVPF 111
                 // Example data channel m-line:
                 //   m=application 9 UDP/DTLS/SCTP webrtc-datachannel
-                in_rtp_media_section = l.contains("RTP/");
+                let mid = lines[i + 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .take_while(|l| !l.starts_with("m="))
+                    .find_map(|l| l.strip_prefix("a=mid:"));
+                let sends = mid.is_some_and(|mid| send_mids.iter().any(|m| m == mid));
+                in_rtp_media_section = l.contains("RTP/") && !sends;
             }
 
             // Change inactive to recvonly for RTP media m-sections.
@@ -478,7 +510,8 @@ impl PeerTransport {
         if inner.single_pc_mode {
             // Fix inactive media m-lines to recvonly for single PC mode.
             // WebRTC can generate a=inactive even when transceivers are recvonly.
-            let recvonly_munged = Self::munge_inactive_to_recvonly_for_media(&sdp);
+            let recvonly_munged =
+                Self::munge_inactive_to_recvonly_for_media(&sdp, &self.send_mids());
             if recvonly_munged != sdp {
                 match SessionDescription::parse(&recvonly_munged, offer.sdp_type()) {
                     Ok(parsed) => {
@@ -788,7 +821,7 @@ m=text 9 UDP/TLS/RTP/SAVPF 98\n\
 a=inactive\n\
 m=audio 9 UDP/TLS/RTP/SAVPF 111\n\
 a=inactive\n";
-        let out = PeerTransport::munge_inactive_to_recvonly_for_media(sdp);
+        let out = PeerTransport::munge_inactive_to_recvonly_for_media(sdp, &[]);
         assert!(out.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111\na=recvonly\n"));
         assert!(out.contains("m=text 9 UDP/TLS/RTP/SAVPF 98\na=recvonly\n"));
         assert_eq!(out.matches("a=recvonly").count(), 4);
@@ -805,9 +838,35 @@ m=audio 9 UDP/TLS/RTP/SAVPF 111\n\
 a=inactive\n\
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel\n\
 a=inactive\n";
-        let out = PeerTransport::munge_inactive_to_recvonly_for_media(sdp);
+        let out = PeerTransport::munge_inactive_to_recvonly_for_media(sdp, &[]);
         assert!(out.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111\na=recvonly\n"));
         assert!(out.contains("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\na=inactive\n"));
+    }
+
+    #[test]
+    fn inactive_send_section_is_not_munged() {
+        // mid 0 is a recvonly section, mid 7 a send transceiver whose track was removed.
+        let sdp = "v=0\n\
+o=- 0 0 IN IP4 127.0.0.1\n\
+s=-\n\
+t=0 0\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\n\
+a=mid:0\n\
+a=inactive\n\
+m=video 9 UDP/TLS/RTP/SAVPF 124\n\
+a=mid:7\n\
+a=inactive\n\
+a=rtpmap:124 H264/90000\n\
+a=fmtp:124 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033\n\
+m=video 9 UDP/TLS/RTP/SAVPF 49\n\
+a=mid:8\n\
+a=sendonly\n";
+        let out =
+            PeerTransport::munge_inactive_to_recvonly_for_media(sdp, &["7".into(), "8".into()]);
+        assert!(out.contains("a=mid:0\na=recvonly\n"));
+        assert!(out.contains("a=mid:7\na=inactive\n"));
+        assert!(out.contains("a=mid:8\na=sendonly\n"));
+        assert_eq!(out.matches("a=recvonly").count(), 1);
     }
 
     #[test]
